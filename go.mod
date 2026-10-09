@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/ProtonMail/go-crypto v1.1.6
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.34.5
 )
 

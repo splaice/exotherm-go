@@ -1,6 +1,7 @@
 // Command exotherm is a local CLI for Catalyst SupportLogs. It opens the
 // split, GPG-encrypted, gzipped tar produced by a Catalyst logger, lists the
-// sessions inside, and exports a session's telemetry to CSV.
+// sessions inside, exports a session's telemetry to CSV, and packs each
+// session from an SD card into its own directory, and lists those packs.
 package main
 
 import (
@@ -15,6 +16,7 @@ import (
 	"github.com/exotherm/exotherm-go/internal/archive"
 	"github.com/exotherm/exotherm-go/internal/catalyst"
 	"github.com/exotherm/exotherm-go/internal/export"
+	"github.com/exotherm/exotherm-go/internal/pack"
 )
 
 const passphraseEnv = "EXOTHERM_GPG_PASSPHRASE"
@@ -37,6 +39,10 @@ func main() {
 		err = cmdSessions(os.Args[2:])
 	case "export":
 		err = cmdExport(os.Args[2:])
+	case "pack":
+		err = cmdPack(os.Args[2:])
+	case "pack-stats":
+		err = cmdPackStats(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -58,14 +64,119 @@ Usage:
   exotherm extract  <input> -o <dir> [--passphrase P]   Decrypt & unpack an upload
   exotherm sessions <path>          [--passphrase P]     List sessions in a bundle
   exotherm export   <path> --session ID [-o file.csv] [--speed m/s|mph|kph] [--passphrase P]
+  exotherm pack       [card] [--dest DIR] [--tmp DIR] [--keep-tmp] [--speed m/s|mph|kph]
+  exotherm pack-stats [--dest DIR]
 
 <input> may be a directory of "*.gpg" parts, a single "...tar.gz.gpg", or one
 split part ("...gpg.aa"). <path> may be an already-extracted directory or an
 archive (auto-extracted to a temp dir).
 
+pack reads a Catalyst SD card (the mounted volume, or the one card it can find)
+and writes one directory per session under the destination. Paths and cleanup
+come from ~/.config/exotherm/config.yaml when that file exists. The defaults
+are dest ~/exotherm, tmp ~/exotherm/tmp, speed mph, and the scratch unpack is
+deleted after the run.
+
+pack-stats reads that same destination and prints one row per pack. CSV is yes
+when session.csv has rows, and JSON is yes when session.json is readable. VIDEO
+is yes when video.mp4 plays, optimal when only the optimal-lap video plays,
+broken when a video file is truncated, and no when the pack has no video.
+UNIQUE names an optimal or average lap when the pack contains one.
+
 The GPG passphrase defaults to the built-in Catalyst passphrase; override it with
 --passphrase or the `+passphraseEnv+` env var.
 `)
+}
+
+func cmdPack(args []string) error {
+	fs := flag.NewFlagSet("pack", flag.ExitOnError)
+	destFlag := fs.String("dest", "", "directory for session packs and index.yaml")
+	tmpFlag := fs.String("tmp", "", "scratch directory for the decrypted log")
+	keepTmp := fs.Bool("keep-tmp", false, "leave the scratch directory in place")
+	speedFlag := fs.String("speed", "", "speed unit: m/s, mph, or kph")
+	pass := fs.String("passphrase", "", "GPG passphrase")
+	pos := parseArgs(fs, args)
+
+	cfg, err := pack.LoadConfig()
+	if err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	dest, tmp, speed, cleanup, err := cfg.Resolve(home)
+	if err != nil {
+		return err
+	}
+	if *destFlag != "" {
+		dest, err = pack.Expand(*destFlag, home)
+		if err != nil {
+			return err
+		}
+	}
+	if *tmpFlag != "" {
+		tmp, err = pack.Expand(*tmpFlag, home)
+		if err != nil {
+			return err
+		}
+	}
+	if dest == tmp {
+		return fmt.Errorf("tmp and dest are the same path (%s)", dest)
+	}
+	if *speedFlag != "" {
+		speed, err = export.ParseSpeedUnit(*speedFlag)
+		if err != nil {
+			return err
+		}
+	}
+	if *keepTmp {
+		cleanup = false
+	}
+	card := ""
+	if len(pos) > 0 {
+		card = pos[0]
+	}
+	_, err = pack.Run(pack.Options{
+		Card:       card,
+		Dest:       dest,
+		Tmp:        tmp,
+		Speed:      speed,
+		Cleanup:    cleanup,
+		Passphrase: passphrase(*pass),
+		Out:        os.Stdout,
+	})
+	return err
+}
+
+func cmdPackStats(args []string) error {
+	fs := flag.NewFlagSet("pack-stats", flag.ExitOnError)
+	destFlag := fs.String("dest", "", "pack library directory (contains sessions/ and index.yaml)")
+	parseArgs(fs, args)
+
+	cfg, err := pack.LoadConfig()
+	if err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	dest, _, _, _, err := cfg.Resolve(home)
+	if err != nil {
+		return err
+	}
+	if *destFlag != "" {
+		dest, err = pack.Expand(*destFlag, home)
+		if err != nil {
+			return err
+		}
+	}
+	rows, err := pack.Stats(dest)
+	if err != nil {
+		return err
+	}
+	return pack.FormatStats(os.Stdout, rows)
 }
 
 // parseArgs parses flags that may appear before or after positional arguments
